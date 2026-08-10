@@ -1,4 +1,4 @@
-# Focus-EdgeTab.ps1  (v11)
+# Focus-EdgeTab.ps1  (v12)
 # Finds an open Edge tab by name (pinned tabs included), selects it, and
 # brings its window to the foreground. Uses only Windows built-ins.
 #
@@ -114,8 +114,19 @@ function Get-EdgeWindows {
 
 # Tabs live several levels down (EdgeTabStripRegionView > EdgeTabStrip >
 # EdgeTabContainerImpl > TabItem), so search the window's descendants.
+#
+# IMPORTANT: web pages can contain their own ARIA role="tab" elements, which
+# surface as TabItem too - Gmail's side panel (Calendar, Keep, Tasks, Contacts,
+# Get Add-ons) is the common offender. Real browser tabs carry a class name;
+# page tabs do not. Filter on that, and fall back to everything only if the
+# class name is unrecognised (a future Edge build, or another Chromium browser).
 function Get-Tabs($win) {
-    $win.FindAll($TS::Descendants, $tabItemCond)
+    $all  = @($win.FindAll($TS::Descendants, $tabItemCond))
+    $real = @($all | Where-Object {
+        $_.Current.ClassName -eq 'EdgeTab' -or $_.Current.ClassName -eq 'Tab'
+    })
+    if ($real.Count) { return $real }
+    return $all
 }
 
 function Try-Focus($element) {
