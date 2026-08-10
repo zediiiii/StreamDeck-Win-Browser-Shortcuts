@@ -1,4 +1,4 @@
-# New-TabButton.ps1  (v16 - portable launchers, live validation, guided UI)
+# New-TabButton.ps1  (v17 - ignore in-page tabs, URL-driven match strings)
 # GUI for building Stream Deck launchers from your currently open Edge tabs.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Scripts\New-TabButton.ps1"
@@ -106,6 +106,32 @@ function Get-CleanName([string]$raw) {
 # durable match needs a second alternative. Keyed by host.
 $HostAlternatives = @{
     'mail.google.com' = @('messaged you - Chat')   # Google Chat hijacks the Gmail title
+}
+
+# When the URL is known, it beats the title outright. A tab showing
+# "Google Drive messaged you - Chat" is still the mail tab, and no title-based
+# rule can know that. These are used by Capture URLs.
+#
+# Values may contain ";;" alternatives. Gmail needs all three forms: the
+# account suffix ("... - JoshWatson.net Mail"), the plain inbox, and the Chat
+# notification title.
+$HostMatch = [ordered]@{
+    'mail.google.com'     = 'Mail;;Inbox;;messaged you - Chat'
+    'calendar.google.com' = 'Calendar'
+    'drive.google.com'    = 'Google Drive'
+    'docs.google.com'     = 'Google Docs'
+    'sheets.google.com'   = 'Google Sheets'
+    'slides.google.com'   = 'Google Slides'
+    'voice.google.com'    = 'Voice -'
+    'keep.google.com'     = 'Keep'
+    'tasks.google.com'    = 'Tasks'
+    'contacts.google.com' = 'Contacts'
+    'photos.google.com'   = 'Google Photos'
+    'gemini.google.com'   = 'Google Gemini'
+    'claude.ai'           = 'Claude'
+    'chatgpt.com'         = 'ChatGPT'
+    'github.com'          = 'GitHub'
+    'youtube.com'         = 'YouTube'
 }
 
 # Is this title segment something that changes on its own? Unread counts,
@@ -230,8 +256,20 @@ function Get-AddressBarUrl($win) {
     return ""
 }
 
+# Web pages can expose their own ARIA role="tab" elements - Gmail's side panel
+# (Calendar, Keep, Tasks, Contacts, Get Add-ons) shows up as TabItem exactly
+# like a browser tab. Real tabs carry a class name; page tabs do not.
+function Get-BrowserTabs($win) {
+    $all  = @($win.FindAll($TS::Descendants, $tabItemCond))
+    $real = @($all | Where-Object {
+        $_.Current.ClassName -eq 'EdgeTab' -or $_.Current.ClassName -eq 'Tab'
+    })
+    if ($real.Count) { return $real }
+    return $all
+}
+
 function Get-SelectedTab($win) {
-    foreach ($t in $win.FindAll($TS::Descendants, $tabItemCond)) {
+    foreach ($t in (Get-BrowserTabs $win)) {
         try {
             $sp = $t.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
             if ($sp.Current.IsSelected) { return $t }
@@ -253,7 +291,7 @@ function Get-AllTabs {
 
     foreach ($w in $windows) {
         $prof = Get-ProfileName $w.Current.Name
-        foreach ($t in $w.FindAll($TS::Descendants, $tabItemCond)) {
+        foreach ($t in (Get-BrowserTabs $w)) {
             $clean = Get-CleanName $t.Current.Name
             $domain = Get-IconDomain $clean
             $match  = Add-HostAlternatives (Get-SuggestedMatch $clean) $domain
@@ -294,7 +332,7 @@ function Get-SafeFileName([string]$s) {
 # ---------------------------------------------------------------------- form
 
 $form               = New-Object System.Windows.Forms.Form
-$form.Text          = "Stream Deck - Edge tab buttons  (v16)"
+$form.Text          = "Stream Deck - Edge tab buttons  (v17)"
 $form.StartPosition = "CenterScreen"
 $form.Size          = New-Object System.Drawing.Size(1290, 700)
 $form.AutoScaleMode = 'Font'
@@ -1136,7 +1174,7 @@ function Invoke-CaptureUrls {
 
     for ($i = 0; $i -lt $windows.Count; $i++) {
         $w = $windows[$i]
-        foreach ($t in $w.FindAll($TS::Descendants, $tabItemCond)) {
+        foreach ($t in (Get-BrowserTabs $w)) {
             $clean = Get-CleanName $t.Current.Name
             if ($wanted -notcontains $clean) { continue }
 
@@ -1147,13 +1185,18 @@ function Invoke-CaptureUrls {
                     $full = Get-UrlPart $url
                     $script:RowState[$clean].Domain = $full
 
-                    # Now that the real host is known, re-derive the match so
-                    # host-specific alternatives get added automatically.
-                    $base = Get-SuggestedMatch $clean
-                    $script:RowState[$clean].Match = Add-HostAlternatives $base $full
-                    if (-not ($script:RowState[$clean].Title)) {
-                        $script:RowState[$clean].Title = Get-KeyTitle $base
+                    # The real host is now known, and it is more reliable than
+                    # the title - especially for a tab caught mid-notification.
+                    $hostName = Get-HostPart $full
+                    if ($HostMatch.Contains($hostName)) {
+                        $newMatch = $HostMatch[$hostName]
+                    } else {
+                        $newMatch = Add-HostAlternatives (Get-SuggestedMatch $clean) $full
                     }
+
+                    $script:RowState[$clean].Match = $newMatch
+                    $script:RowState[$clean].Title = Get-KeyTitle (($newMatch -split ';;')[0])
+                    $script:RowState[$clean].File  = "Focus " + (Get-SafeFileName (($newMatch -split ';;')[0])) + ".vbs"
                     $found++
                 } else {
                     $missed += $clean
