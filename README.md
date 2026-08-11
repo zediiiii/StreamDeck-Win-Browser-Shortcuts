@@ -158,7 +158,7 @@ Match text accepts alternatives separated by `;;`. Useful when a site rewrites
 its own title:
 
 ```
-JoshWatson.net Mail;;messaged you - Chat
+Mydomain Mail;;messaged you - Chat
 ```
 
 That matches the mail tab whether it shows the mailbox or a chat notification.
