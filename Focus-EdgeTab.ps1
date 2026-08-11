@@ -1,4 +1,4 @@
-# Focus-EdgeTab.ps1  (v12)
+# Focus-EdgeTab.ps1  (v14)
 # Finds an open Edge tab by name (pinned tabs included), selects it, and
 # brings its window to the foreground. Uses only Windows built-ins.
 #
@@ -112,21 +112,95 @@ function Get-EdgeWindows {
     return $all
 }
 
-# Tabs live several levels down (EdgeTabStripRegionView > EdgeTabStrip >
-# EdgeTabContainerImpl > TabItem), so search the window's descendants.
+# Locate the browser's tab strip by walking DOWN from the window a bounded
+# number of levels. Page content is never entered, so ARIA role="tab" elements
+# inside a web app - Gmail's side panel, the Word Online ribbon - cannot be
+# mistaken for browser tabs.
 #
-# IMPORTANT: web pages can contain their own ARIA role="tab" elements, which
-# surface as TabItem too - Gmail's side panel (Calendar, Keep, Tasks, Contacts,
-# Get Add-ons) is the common offender. Real browser tabs carry a class name;
-# page tabs do not. Filter on that, and fall back to everything only if the
-# class name is unrecognised (a future Edge build, or another Chromium browser).
+# Structure: window > ... > EdgeTabStripRegionView > EdgeTabStrip >
+#            EdgeTabContainerImpl > TabItem(class EdgeTab)
+# Chrome uses TabStripRegionView, hence the wildcard.
+function Find-TabStrip($win) {
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $queue  = New-Object System.Collections.Queue
+    $queue.Enqueue(@{ El = $win; Depth = 0 })
+
+    while ($queue.Count -gt 0) {
+        $item = $queue.Dequeue()
+        if ($item.Depth -gt 8) { continue }
+
+        try { $child = $walker.GetFirstChild($item.El) } catch { $child = $null }
+        while ($child -ne $null) {
+            $cn = ""
+            try { $cn = $child.Current.ClassName } catch { }
+
+            if ($cn -like '*TabStrip*') { return $child }
+
+            # Never descend into rendered page content.
+            if ($cn -ne 'Chrome_RenderWidgetHostHWND') {
+                $queue.Enqueue(@{ El = $child; Depth = $item.Depth + 1 })
+            }
+
+            try { $child = $walker.GetNextSibling($child) } catch { $child = $null }
+        }
+    }
+    return $null
+}
+
+# TreeWalker sees nodes that a cached FindAll can miss while Chromium is still
+# populating its tree, so it is worth a second pass.
+function Get-StripTabsByWalk($strip) {
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $found  = @()
+    $queue  = New-Object System.Collections.Queue
+    $queue.Enqueue(@{ El = $strip; Depth = 0 })
+
+    while ($queue.Count -gt 0) {
+        $item = $queue.Dequeue()
+        if ($item.Depth -gt 4) { continue }
+        try { $child = $walker.GetFirstChild($item.El) } catch { $child = $null }
+        while ($child -ne $null) {
+            $isTab = $false
+            try {
+                $isTab = ($child.Current.ControlType -eq $CT::TabItem) -or
+                         ($child.Current.ClassName -eq 'EdgeTab')
+            } catch { }
+            if ($isTab) { $found += $child }
+            else { $queue.Enqueue(@{ El = $child; Depth = $item.Depth + 1 }) }
+            try { $child = $walker.GetNextSibling($child) } catch { $child = $null }
+        }
+    }
+    return $found
+}
+
+function Get-Tabs_Once($win) {
+    $strip = Find-TabStrip $win
+    if ($strip) {
+        $tabs = @($strip.FindAll($TS::Descendants, $tabItemCond))
+        if ($tabs.Count) { return $tabs }
+
+        $tabs = @(Get-StripTabsByWalk $strip)
+        if ($tabs.Count) { return $tabs }
+    }
+
+    # Last resort: only elements Edge itself classes as a tab. A web app's own
+    # tab controls (class ms-Button, and similar) must never qualify.
+    $real = @($win.FindAll($TS::Descendants, $tabItemCond) |
+              Where-Object { $_.Current.ClassName -eq 'EdgeTab' })
+    return $real
+}
+
+# Chromium builds its accessibility tree LAZILY, only once a UIA client asks
+# for it. A freshly started process therefore sees an empty tab strip on the
+# first query - the tree is still being constructed. Retry briefly rather than
+# reporting a window as having no tabs.
 function Get-Tabs($win) {
-    $all  = @($win.FindAll($TS::Descendants, $tabItemCond))
-    $real = @($all | Where-Object {
-        $_.Current.ClassName -eq 'EdgeTab' -or $_.Current.ClassName -eq 'Tab'
-    })
-    if ($real.Count) { return $real }
-    return $all
+    for ($attempt = 0; $attempt -lt 8; $attempt++) {
+        $tabs = @(Get-Tabs_Once $win)
+        if ($tabs.Count) { return $tabs }
+        Start-Sleep -Milliseconds 250
+    }
+    return @()
 }
 
 function Try-Focus($element) {
@@ -264,7 +338,7 @@ function Start-Edge([string]$urlOrEmpty) {
 if ($ListTabs) {
     foreach ($w in (Get-EdgeWindows)) {
         "--- $($w.Current.Name)"
-        $tabs = Get-Tabs $w
+        $tabs = @(Get-Tabs $w)
         if ($tabs.Count -eq 0) { "    (no TabItems exposed)" }
         foreach ($t in $tabs) { "    [$($t.Current.Name)]" }
     }
@@ -315,7 +389,7 @@ if ($hit) {
 
 # Nothing matched. Count what we did see, so the log is actionable.
 $tabTotal = 0
-foreach ($w in (Get-EdgeWindows)) { $tabTotal += (Get-Tabs $w).Count }
+foreach ($w in (Get-EdgeWindows)) { $tabTotal += @(Get-Tabs $w).Count }
 Write-Log "NO MATCH. Searched $tabTotal tabs for: $($Patterns -join ' OR ')"
 if ($Explain) { Show-Explain "NOT FOUND" }
 
