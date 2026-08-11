@@ -1,5 +1,6 @@
 # Stream Deck — Browser Tab Buttons
 
+Built in Streamdeck browser shortcuts always open a new tab. This version intelligently addresses that issue with awareness of Edge profiles and which tabs are already open.
 Turn any open browser tab into a Stream Deck key. Press the key, that tab comes
 to the front. If the tab is closed, press twice and it opens. If the browser is
 closed entirely, one press starts it.
